@@ -930,32 +930,39 @@ func (ec *elfCode) loadDataSections(maps map[string]*MapSpec) error {
 			return fmt.Errorf("data section %s: can't get BTF: %w", sec.Name, err)
 		}
 
-		data, err := sec.Data()
-		if err != nil {
-			return fmt.Errorf("data section %s: can't get contents: %w", sec.Name, err)
-		}
-
-		if uint64(len(data)) > math.MaxUint32 {
-			return fmt.Errorf("data section %s: contents exceed maximum size", sec.Name)
-		}
-
 		mapSpec := &MapSpec{
 			Name:       SanitizeName(sec.Name, -1),
 			Type:       Array,
 			KeySize:    4,
-			ValueSize:  uint32(len(data)),
+			ValueSize:  uint32(sec.Size),
 			MaxEntries: 1,
-			Contents:   []MapKV{{uint32(0), data}},
 			BTF:        &btf.Map{Spec: ec.btf, Key: &btf.Void{}, Value: datasec},
 		}
 
-		switch sec.Name {
-		case ".rodata":
+		switch sec.Type {
+		// Only open the section if we know there's actual data to be read.
+		case elf.SHT_PROGBITS:
+			data, err := sec.Data()
+			if err != nil {
+				return fmt.Errorf("data section %s: can't get contents: %w", sec.Name, err)
+			}
+
+			if uint64(len(data)) > math.MaxUint32 {
+				return fmt.Errorf("data section %s: contents exceed maximum size", sec.Name)
+			}
+			mapSpec.Contents = []MapKV{{uint32(0), data}}
+
+		case elf.SHT_NOBITS:
+			// NOBITS sections like .bss contain only zeroes, and since data sections
+			// are Arrays, the kernel already preallocates them. Skip reading zeroes
+			// from the ELF.
+		default:
+			return fmt.Errorf("data section %s: unknown section type %s", sec.Name, sec.Type)
+		}
+
+		if strings.HasPrefix(sec.Name, ".rodata") {
 			mapSpec.Flags = unix.BPF_F_RDONLY_PROG
 			mapSpec.Freeze = true
-		case ".bss":
-			// The kernel already zero-initializes the map
-			mapSpec.Contents = nil
 		}
 
 		maps[sec.Name] = mapSpec
